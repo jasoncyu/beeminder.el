@@ -429,17 +429,14 @@ goal slug and return that goal instead."
 	 (beeminder-read-slug default)))
     (ewoc-data (ewoc-locate beeminder-goals-ewoc))))
 
-(defun beeminder-current-time-hmsz-string (&optional timestamp)
+(defcustom beeminder-time-format "%FT%T%z"
+  "Default time format for Beeminder comments.")
+
+(defun beeminder-current-time-string (&optional timestamp)
   "Return TIMESTAMP (Unix time) as a string.
 Use current time by default.  Format is hh:mm:ss tz."
-  (let ((decoded-time (decode-time (or (when timestamp
-					 (seconds-to-time timestamp))
-				       (beeminder-current-time)))))
-    (format "%02d:%02d:%02d %s"
-	    (caddr decoded-time)
-	    (cadr decoded-time)
-	    (car decoded-time)
-	    (cadr (current-time-zone (apply #'encode-time decoded-time))))))
+  (format-time-string beeminder-time-format
+		      (or timestamp (beeminder-current-time))))
 
 (defvar beeminder-dirty-alist '()
   "Alist of slugs and \"curval\" values of changed goals.
@@ -476,7 +473,7 @@ If `org-read-date' is present, use that; if not, fall back to
   "Generate the default comment for the given TIMESTAMP."
   (concat
    "via Emacs at "
-   (beeminder-current-time-hmsz-string timestamp)))
+   (beeminder-current-time-string timestamp)))
 
 (defun beeminder-ask-for-comment (slug-str amount &optional default-comment)
   "Ask the user for the comment for the goal named SLUG-STR.
@@ -1101,14 +1098,14 @@ variable is somehow messed up)."
   "Save the current filters."
   (interactive)
   (setq beeminder-saved-filters
-	beeminder-current-filters)
+	(copy-alist beeminder-current-filters))
   (beeminder-log (format "current filter settings %s saved." beeminder-current-filters)))
 
 (defun beeminder-retrieve-filters ()
   "Retrieve saved filters."
   (interactive)
   (setq beeminder-current-filters
-	beeminder-saved-filters)
+	(copy-alist beeminder-saved-filters))
   (beeminder-refresh-goals-list)
   (beeminder-log (format "filter settings %s retrieved." beeminder-current-filters)))
 
@@ -1443,7 +1440,7 @@ and insert the result in the goal details info.")
   '((beeminder-display-string-field id 25 t)
     (beeminder-display-time-field timestamp)
     "  "
-    (beeminder-display-string-field value 4)
+    (beeminder-display-string-field value 8)
     "  "
     (beeminder-display-string-field comment))
   "The format for displaying a goal's datapoint.
@@ -1708,6 +1705,14 @@ The internal representation is an alist."
 
 (define-key beeminder-goal-mode-map (kbd ".") #'beeminder-display-raw-goal-details)
 
+(defun beeminder-view-in-browser (goal)
+  "View GOAL in the web browser."
+  (interactive (list (or beeminder-detailed-goal (current-or-read-goal))))
+  (browse-url (format "https://beeminder.com/%s/%s" beeminder-username (beeminder-alist-get 'slug goal))))
+
+(define-key beeminder-mode-map (kbd "W") #'beeminder-view-in-browser)
+(define-key beeminder-goal-mode-map (kbd "W") #'beeminder-view-in-browser)
+
 
 ;; Downloading more datapoints
 (defun beeminder-download-datapoints (slug-str days)
@@ -1912,6 +1917,42 @@ the graph is already displayed."
 (defcustom beeminder-org-inherit-beeminder-properties nil
   "Make beeminder.el use property inheritance.")
 
+(defcustom beeminder-org-default-comment "%h at %t"
+  "Default format of the comment")
+
+(defun beeminder-org-string-substitute (string)
+  "Substitute strings for percent-sign codes in STRING.
+Codes are: `%t' - current time, `%h' - current headline, `%p' -
+current path, `%%' - percent sign."
+  (let ((time (beeminder-current-time-string))
+	(headline (substring-no-properties (org-get-heading t t)))
+	(path (mapconcat #'identity (org-get-outline-path t) "/")))
+    (format-spec string
+		 `((?% . "%")
+		   (?t . ,time)
+		   (?h . ,headline)
+		   (?p . ,path)))))
+
+(defun beeminder-org-generate-comment ()
+  "Given the comment property, generate the comment text.  Assume
+that the point is in the right place."
+  (let ((comment-prop
+	 (or (org-entry-get (point)
+			    "comment"
+			    beeminder-org-inherit-beeminder-properties)
+	     beeminder-org-default-comment)))
+    (cond
+     ((string= comment-prop "time")
+      (concat "via Org-mode at " (beeminder-current-time-string)))
+     ((string= comment-prop "ask")
+      nil)
+     ((or (string= comment-prop "headline")
+	  (null comment-prop))
+      (substring-no-properties (org-get-heading t t)))
+     ((string= comment-prop "path")
+      (mapconcat #'identity (org-get-outline-path t) "/"))
+     (t (beeminder-org-string-substitute comment-prop)))))
+
 (defun beeminder-org-submit-on-done (state-change)
   "Submit a datapoint when marking an item as DONE.
 This function should be placed in `org-trigger-hook'.  It looks
@@ -1929,8 +1970,7 @@ property (asks for the comment if it is present)."
 	     (eq (plist-get state-change :type)
 		 'todo-state-change)
 	     (member (plist-get state-change :to)
-		     org-done-keywords)
-	     (org-entry-get position "slug" beeminder-org-inherit-beeminder-properties))
+		     org-done-keywords))
 	(let* ((slug-str (org-entry-get position
 					"slug"
 					beeminder-org-inherit-beeminder-properties))
@@ -1939,10 +1979,7 @@ property (asks for the comment if it is present)."
 					   beeminder-org-inherit-beeminder-properties)
 			   (string-to-number it)
 			 1))
-	       (comment (unless (org-entry-get position
-					       "ask-comment"
-					       beeminder-org-inherit-beeminder-properties)
-			  (concat "via Org-mode at " (beeminder-current-time-hmsz-string)))))
+	       (comment (beeminder-org-generate-comment)))
 	  (beeminder-submit-datapoint slug-str amount comment)))))
 
 (defun beeminder-org-submit-clock-at-point ()
@@ -1961,20 +1998,7 @@ that the user may want to submit clock items later."
 		   (slug-str (org-entry-get (point)
 					    "slug"
 					    beeminder-org-inherit-beeminder-properties))
-		   (comment (let ((comment-prop (org-entry-get (point)
-							       "comment"
-							       beeminder-org-inherit-beeminder-properties)))
-			      (cond
-			       ((string= comment-prop "time")
-				(concat "via Org-mode at " (beeminder-current-time-hmsz-string)))
-			       ((string= comment-prop "ask")
-				nil)
-			       ((or (string= comment-prop "headline")
-				    (null comment-prop))
-				(substring-no-properties (org-get-heading t t)))
-			       ((string= comment-prop "path")
-				(mapconcat #'identity (org-get-outline-path t) "/"))
-			       (t comment-prop))))
+		   (comment (beeminder-org-generate-comment))
 		   (multiplier (cl-case (intern (or (org-entry-get (point)
 								   "unit"
 								   beeminder-org-inherit-beeminder-properties)
